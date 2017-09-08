@@ -89,31 +89,35 @@ void classify_tiles(
     const string region_fname, const string boundary_fname,
     const string main_fname, set<zxy>* interior_set,
     set<zxy>* boundary_set, set<zxy>* main_set) {
+  cerr << "Classifying tiles..." << endl;
   set<zxy> region_set;
   create_tile_set(region_fname, &region_set);
   create_tile_set(boundary_fname, boundary_set);
   set_difference(region_set.begin(), region_set.end(),
-                      boundary_set->begin(), boundary_set->end(),
-                      inserter(*interior_set, interior_set->end()));
+                 boundary_set->begin(), boundary_set->end(),
+                 inserter(*interior_set, interior_set->end()));
 
   create_tile_set(main_fname, main_set);
   set<zxy> exterior_set;
   set_difference(main_set->begin(), main_set->end(),
-                      region_set.begin(), region_set.end(),
-                      inserter(exterior_set, exterior_set.end()));
+                 region_set.begin(), region_set.end(),
+                 inserter(exterior_set, exterior_set.end()));
 
-  cout << "Total number of tiles in main tileset: " << main_set->size()
-       << endl;
-  cout << "Number of interior tiles: " << interior_set->size() << endl;
-  cout << "Number of boundary tiles: " << boundary_set->size() << endl;
-  cout << "Number of exterior tiles: " << exterior_set.size() << endl;
-  cout << "Number of not classified tiles: "
-       << main_set->size() - interior_set->size() - boundary_set->size() -
-             exterior_set.size() << endl;
+  const long long main = main_set->size();
+  const long long interior = interior_set->size();
+  const long long boundary = boundary_set->size();
+  const long long exterior = exterior_set.size();
+  cout << "Total number of tiles in main tileset: " << main << endl;
+  cout << "Number of interior tiles: " << interior << endl;
+  cout << "Number of boundary tiles: " << boundary << endl;
+  cout << "Number of exterior tiles: " << exterior << endl;
+  cout << "Difference (main-interior-boundary-exterior): "
+       << main - interior - boundary - exterior << endl;
 }
 
 void delete_interior_tiles(string fname, set<zxy> main_tiles,
                            set<zxy> interior_tiles) {
+  cerr << "Deleting interior tiles..." << endl;
   sqlite3 *db;
   if (sqlite3_open(fname.c_str(), &db) != SQLITE_OK) {
     cerr << fname << ": " << sqlite3_errmsg(db) << endl;
@@ -342,6 +346,7 @@ void mbtiles_update_tile(sqlite3 *outdb, int tz, int tx, int ty,
 void clear_boundary_tiles(const string& main_fname,
                           const string& region_fname,
                           set<zxy> boundary_tiles) {
+  cerr << "Process features in boundary tiles..." << endl;
   sqlite3 *main_db;
   sqlite3 *region_db;
   if (sqlite3_open(main_fname.c_str(), &main_db) != SQLITE_OK) {
@@ -447,6 +452,17 @@ void usage(char **argv) {
   exit(EXIT_FAILURE);
 }
 
+void print_elapsed_time(const chrono::steady_clock::time_point& begin) {
+  const chrono::steady_clock::time_point end = chrono::steady_clock::now();
+  const chrono::seconds secs =
+      chrono::duration_cast<chrono::seconds>(end - begin);
+  const unsigned int hours =
+      static_cast<unsigned int>(secs.count() / 3600.0);
+  cerr << "Elapsed time: " << hours
+       << " h " << static_cast<int>((secs.count() - 3600 * hours) / 60.0)
+       << " m " << static_cast<int>(secs.count()%60) << " s" << endl;
+}
+
 int main(int argc, char **argv) {
   extern char *optarg;
   int i;
@@ -483,67 +499,64 @@ int main(int argc, char **argv) {
   while ((i = getopt_long(argc, argv, getopt_str.c_str(), long_options,
          NULL)) != -1) {
     switch (i) {
-	  case 0:
-	    break;
-	  case 'm':
-	    main_tileset = optarg;
-	    break;
+      case 0:
+        break;
+      case 'm':
+        main_tileset = optarg;
+        break;
       case 'r':
         region_tileset = optarg;
-	    break;
+        break;
       case 'b':
         boundary_tileset = optarg;
-	    break;
+        break;
       case 'h':
         usage(argv);
-	    break;
+        break;
       case 'v':
-	    verbose = true;
-	    break;
+        verbose = true;
+        break;
       case 'B':
         change_boundary_features = true;
-	    break;
+        break;
       case 'R':
         delete_tiles_within_region = true;
-	    break;
+        break;
       case 'V':
         vacuum_mbtiles = true;
-	    break;
+        break;
       default:
-	    usage(argv);
-	  }
-	}
+        usage(argv);
+      }
+  }
 
-    if (main_tileset.empty() || region_tileset.empty() ||
-        boundary_tileset.empty()) {
-      usage(argv);
-    }
-    const chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+  if (main_tileset.empty() || region_tileset.empty() ||
+      boundary_tileset.empty()) {
+    usage(argv);
+  }
+  const chrono::steady_clock::time_point begin = chrono::steady_clock::now();
 
-    set<zxy> main_tiles;
-    set<zxy> interior_tiles;
-	set<zxy> boundary_tiles;	
-    classify_tiles(
-        region_tileset, boundary_tileset, main_tileset,
-        &interior_tiles, &boundary_tiles, &main_tiles);
+  set<zxy> main_tiles;
+  set<zxy> interior_tiles;
+  set<zxy> boundary_tiles;
+  classify_tiles(
+      region_tileset, boundary_tileset, main_tileset,
+      &interior_tiles, &boundary_tiles, &main_tiles);
+  print_elapsed_time(begin);
 
-    if (delete_tiles_within_region) {
-      delete_interior_tiles(main_tileset, main_tiles, interior_tiles);
-    }
-    if (change_boundary_features) {
-      clear_boundary_tiles(main_tileset, region_tileset, boundary_tiles);
-    }
-    if (vacuum_mbtiles) {
-      mbtile_vacuum(main_tileset);
-    }
+  if (delete_tiles_within_region) {
+    delete_interior_tiles(main_tileset, main_tiles, interior_tiles);
+    print_elapsed_time(begin);
+  }
 
-    const chrono::steady_clock::time_point end = chrono::steady_clock::now();
-    const chrono::seconds secs =
-        chrono::duration_cast<chrono::seconds>(end - begin);
-    const unsigned int hours =
-        static_cast<unsigned int>(secs.count() / 3600.0);
-    cout << "Elapsed time: " << hours
-         << " h " << static_cast<int>((secs.count() - 3600 * hours) / 60.0)
-         << " m " << static_cast<int>(secs.count()%60) << " s" << endl;
-	return 0;
+  if (change_boundary_features) {
+    clear_boundary_tiles(main_tileset, region_tileset, boundary_tiles);
+    print_elapsed_time(begin);
+  }
+
+  if (vacuum_mbtiles) {
+    mbtile_vacuum(main_tileset);
+    print_elapsed_time(begin);
+  }
+  return 0;
 }
