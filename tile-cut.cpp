@@ -115,40 +115,76 @@ void classify_tiles(
        << main - interior - boundary - exterior << endl;
 }
 
-void delete_interior_tiles(string fname, set<zxy> main_tiles,
-                           set<zxy> interior_tiles) {
+void identify_zoom_range(sqlite3* db, int* min_zoom, int* max_zoom) {
+  if (db == NULL || min_zoom == NULL || max_zoom == NULL) {
+    return;
+  }
+  string query = "select min(zoom_level) from tiles;";
+  sqlite3_stmt* stmt;
+  if (sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, NULL) != SQLITE_OK) {
+    cerr << "select failed: " << sqlite3_errmsg(db) << endl;
+    exit(EXIT_FAILURE);
+  }
+  if (sqlite3_step(stmt) == SQLITE_ROW) {
+    *min_zoom = sqlite3_column_int(stmt, 0);
+  }
+  sqlite3_finalize(stmt);
+
+  query = "select max(zoom_level) from tiles;";
+  if (sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, NULL) != SQLITE_OK) {
+    cerr << "select failed: " << sqlite3_errmsg(db) << endl;
+    exit(EXIT_FAILURE);
+  }
+  if (sqlite3_step(stmt) == SQLITE_ROW) {
+    *max_zoom = sqlite3_column_int(stmt, 0);
+  }
+  sqlite3_finalize(stmt);
+  cout << "Zoom range of main tileset: " << *min_zoom << " - " << *max_zoom
+       << endl;
+}
+
+void delete_interior_tiles(string fname, set<zxy> interior_tiles,
+                           bool main_is_raster) {
   cerr << "Deleting interior tiles..." << endl;
   sqlite3 *db;
   if (sqlite3_open(fname.c_str(), &db) != SQLITE_OK) {
     cerr << fname << ": " << sqlite3_errmsg(db) << endl;
     exit(EXIT_FAILURE);
   }
-  const int kNumInteriorTiles = interior_tiles.size();
-  int num_tiles_deleted = 0;
+  char query[200];
+  // We assume that the size of raster tiles is 256 x 256 px. This results in
+  // a zoom level increased by one and 2 x 2 tiles.
+  const int num_tiles = main_is_raster ? 4 : 1;
+  long long num_tiles_deleted = 0;
+  int min_zoom = 0, max_zoom = 24;
+  identify_zoom_range(db, &min_zoom, &max_zoom);
   for (auto t : interior_tiles) {
-    char query[200];
-    snprintf(
-        query, 200,
-        "delete from tiles where zoom_level=%lld and tile_column=%lld "
-        "and tile_row=%lld;",
-        t.z, t.x, t.y);
-    char *err = 0;
-    int rc = sqlite3_exec(db, query, NULL, NULL, &err);
-    if (rc != SQLITE_OK){
-      cerr << "SQL error: " << err << endl;
-      sqlite3_free(err);
-    } else {
-      num_tiles_deleted++;
-      if (num_tiles_deleted == kNumInteriorTiles) {
-        cout << "All interior tiles deleted: "
-             << num_tiles_deleted << "/" << kNumInteriorTiles << endl;
-      } else if(num_tiles_deleted%1000 == 0) {
-        cout << "Interior tiles deleted: "
-             << num_tiles_deleted << "/" << kNumInteriorTiles << endl;
-      }
+    const int zoom_level = main_is_raster ? t.z + 1 : t.z;
+    if (zoom_level < min_zoom || zoom_level > max_zoom) {
+      continue;
+    }
+    for (int i = 0; i < num_tiles; ++i) {
+      const long long tile_column = main_is_raster ? t.x * 2 + i%2 : t.x;
+      const long long tile_row = main_is_raster ? t.y * 2 + i/2 : t.y;
+      snprintf(
+          query, 200,
+          "delete from tiles where zoom_level=%d and tile_column=%lld "
+          "and tile_row=%lld;",
+          zoom_level, tile_column, tile_row);
       if (verbose) {
-        cout << "Row " << t.z << "/" << t.x << "/" << t.y
-             << " deleted successfully." << endl;
+        cout << "[" << t.z << "/" << t.x << "/" << t.y << "]: "<< query
+             << endl;
+      }
+      char *err = 0;
+      int rc = sqlite3_exec(db, query, NULL, NULL, &err);
+      if (rc != SQLITE_OK){
+        cerr << "SQL error: " << err << endl;
+        sqlite3_free(err);
+      } else {
+        num_tiles_deleted++;
+        if(num_tiles_deleted%1000 == 0) {
+          cout << "Interior tiles deleted: " << num_tiles_deleted << endl;
+        }
       }
     }
   }
@@ -162,28 +198,7 @@ void delete_interior_tiles(string fname, set<zxy> main_tiles,
   create_tile_set(fname, &main_set_after_deletion);
   cout << "Number of main tiles after deletion: "
        << main_set_after_deletion.size() << endl;
-
-  // Verify result after deletion.
-  set<zxy> main_deleted_set;
-  set_difference(main_tiles.begin(), main_tiles.end(),
-                      main_set_after_deletion.begin(),
-                      main_set_after_deletion.end(),
-                      inserter(main_deleted_set, main_deleted_set.end()));
-  set<zxy> diff_expected_real;
-  set_difference(interior_tiles.begin(), interior_tiles.end(),
-      main_deleted_set.begin(), main_deleted_set.end(),
-      inserter(diff_expected_real, diff_expected_real.end()));
-  if (!diff_expected_real.empty()) {
-    cout << "Total number of failed deletions: "
-         << diff_expected_real.size() << endl;
-    for (auto t : diff_expected_real) {
-      cout << "Failed to delete tile  " << t.z << " " << t.x << " "
-           << t.y << " (flipped y: " << (1LL << t.z) - 1 - t.y << ")"
-           << endl;
-    }
-  }
 }
-
 
 void read_tile(sqlite3* db, const zxy& t, mvt_tile* tile) {
   const string query = "SELECT tile_data from tiles where zoom_level=? "
@@ -442,6 +457,8 @@ void usage(char **argv) {
           "cut out as polygon (required).\n"
           "  --boundary-tileset\t\t-b\tBoundary MBtile containing the outline "
           "of the region to cut out (required).\n"
+          "  --main-is-raster\t-s\tIf set the main tileset contains raster "
+          "data with a tile size of 256 px. [default: off]\n"
           "  --help\t\t\t-h\tShow this usage.\n"
           "  --delete-tiles-within-region\t-R\tRemove tiles within region "
           "[default: off].\n"
@@ -468,6 +485,7 @@ int main(int argc, char **argv) {
   int i;
   bool change_boundary_features = false;
   bool delete_tiles_within_region = false;
+  bool main_is_raster = false;
   bool vacuum_mbtiles = false;
 
   string main_tileset;
@@ -478,6 +496,7 @@ int main(int argc, char **argv) {
     {"main-tileset", required_argument, 0, 'm'},
 	{"region-tileset", required_argument, 0, 'r'},
 	{"boundary-tileset", required_argument, 0, 'b'},
+	{"main-is-raster", no_argument, 0, 's'},
 	{"help", no_argument, 0, 'h'},
 	{"change-boundary-features", no_argument, 0, 'B'},
 	{"delete-tiles-within-region", no_argument, 0, 'R'},
@@ -509,6 +528,9 @@ int main(int argc, char **argv) {
         break;
       case 'b':
         boundary_tileset = optarg;
+        break;
+      case 's':
+        main_is_raster = true;
         break;
       case 'h':
         usage(argv);
@@ -545,13 +567,17 @@ int main(int argc, char **argv) {
   print_elapsed_time(begin);
 
   if (delete_tiles_within_region) {
-    delete_interior_tiles(main_tileset, main_tiles, interior_tiles);
+    delete_interior_tiles(main_tileset, interior_tiles, main_is_raster);
     print_elapsed_time(begin);
   }
 
   if (change_boundary_features) {
-    clear_boundary_tiles(main_tileset, region_tileset, boundary_tiles);
-    print_elapsed_time(begin);
+    if (main_is_raster) {
+      cerr << "WARNING: Processing of raster boundary tiles skipped." << endl;
+    } else {
+      clear_boundary_tiles(main_tileset, region_tileset, boundary_tiles);
+      print_elapsed_time(begin);
+    }
   }
 
   if (vacuum_mbtiles) {
