@@ -9,11 +9,17 @@
 #include <vector>
 
 #include "geometry.hpp"
+#include "mapbox/geometry/point.hpp"
+#include "mapbox/geometry/polygon.hpp"
+#include "mapbox/geometry/wagyu/util.hpp"
 #include "mbtiles.hpp"
 #include "mvt.hpp"
 #include "protozero/pbf_reader.hpp"
 
 using namespace std;
+using mapbox::geometry::linear_ring;
+using mapbox::geometry::point;
+using mapbox::geometry::polygon;
 
 bool verbose = false;
 
@@ -234,12 +240,6 @@ void read_tile(sqlite3* db, const zxy& t, mvt_tile* tile) {
   }
 }
 
-// TODO: Implement this function.
-bool feature_intersects_region(const mvt_feature& region_feature,
-                               const mvt_feature& main_feature) {
-  return true;
-}
-
 int clear_names(mvt_layer* layer, mvt_feature* feature) {
   int num_names_cleaned = 0;
   for (size_t t = 0; t + 1 < feature->tags.size(); t += 2) {
@@ -269,32 +269,107 @@ int clear_names(mvt_layer* layer, mvt_feature* feature) {
   return num_names_cleaned;
 }
 
-// Returns the first feature of the first layer in the tile.
-const mvt_feature* get_region_feature(const zxy& t,
-                                      const mvt_tile& region_tile) {
+void get_region_polygons(const zxy& t,
+                         const mvt_tile& region_tile,
+                         vector<polygon<int64_t> >* polygons) {
+  if (polygons == NULL) {
+    return;
+  }
+  polygons->clear();
   if (region_tile.layers.empty()) {
     cerr << "WARNING: Region tile " << t.z << " " << t.x << " " << t.y
          << " does not have any layer. Skipping clean-up of boundary tile."
          << endl;
-    return NULL;
-  } else if (region_tile.layers.size() > 1) {
-    cerr << "WARNING: Region tile " << t.z << " " << t.x << " " << t.y
-         << " has more than one layer: "
-         << static_cast<int>(region_tile.layers.size()) << endl;
-    return &region_tile.layers[0].features[0];
   } else if (region_tile.layers[0].features.empty()) {
     cerr << "WARNING: Region tile " << t.z << " " << t.x << " " << t.y
          << " does not have any feature. Skipping clean-up of boundary tile."
          << endl;
-    return NULL;
+  } else if (region_tile.layers.size() > 1) {
+    cerr << "WARNING: Region tile " << t.z << " " << t.x << " " << t.y
+         << " has more than one layer: "
+         << static_cast<int>(region_tile.layers.size()) << endl;
   }
-  return &region_tile.layers[0].features[0];
+  if (region_tile.layers[0].features[0].type != mvt_polygon) {
+    cerr << "WARNING: Feature in region tile " << t.z << " " << t.x << " "
+         << t.y << " does not have polygon geometry. Skipping clean-up of "
+         "boundary tile." << endl;
+  }
+  int64_t num_rings = 0;
+  for (size_t f = 0; f < region_tile.layers[0].features.size(); f++) {
+    polygon<int64_t> poly;
+    linear_ring<int64_t> ring;
+    const mvt_feature& feature = region_tile.layers[0].features[f];
+    if (feature.type != mvt_polygon) {
+      continue;
+    }
+    for (size_t g = 0; g < feature.geometry.size(); g++) {
+      if (feature.geometry[g].op == VT_MOVETO) {
+        // Start of new ring.
+        ring.push_back({feature.geometry[g].x, feature.geometry[g].y});
+      } else if (feature.geometry[g].op == VT_CLOSEPATH) {
+        // Close ring by adding first point.
+        ring.push_back(ring.front());
+        // Add recent ring.
+        poly.push_back(ring);
+        ring.clear();
+        num_rings++;
+      } else {
+        ring.push_back({feature.geometry[g].x, feature.geometry[g].y});
+      }
+    }
+    polygons->push_back(poly);
+  }
+  if (verbose) {
+    cerr << "Tile [" << t.z << " " << t.x << " " << t.y
+         << "]: num_polygons: " << polygons->size() << ", num_rings: "
+         << num_rings << endl;
+  }
 }
 
-static const mvt_feature* region_feature = NULL;
+// Modified from https://wrf.ecse.rpi.edu//Research/Short_Notes/pnpoly.html
+static int pnpoly(const linear_ring<int64_t>& ring,
+                  const point<int64_t>& point) {
+  size_t i, j;
+  bool c = false;
+  for (i = 0, j = ring.size() - 1; i < ring.size(); j = i++) {
+    if (((ring[i].y > point.y) != (ring[j].y > point.y)) &&
+        (point.x < (ring[j].x - ring[i].x) * (point.y - ring[i].y) /
+         (double) (ring[j].y - ring[i].y) + ring[i].x))  {
+      c = !c;
+    }
+  }
+  return c;
+}
+
+bool feature_intersects_region(vector<polygon<int64_t> > region_polygons,
+                               const mvt_feature& main_feature) {
+  if (region_polygons.empty()) {
+    return false;
+  }
+  // A feature intersects as soon as one point lies within a polygon.
+  for (size_t g = 0; g < main_feature.geometry.size(); g++) {
+    const point<int64_t> pt(main_feature.geometry[g].x,
+                            main_feature.geometry[g].y);
+    // Check the point against every ring in polygons.
+    for (size_t p = 0; p < region_polygons.size(); p++) {
+      for (size_t r = 0; r < region_polygons[p].size(); r++) {
+        const linear_ring<int64_t>& ring = region_polygons[p][r];
+        // TODO: Add support for holes where a ring could be a inner ring,
+        // i.e. a hole.
+        // const bool is_outer_ring = area(ring) > 0 ? true : false;
+        if (pnpoly(ring, pt)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+static vector<polygon<int64_t>> region_polygons;
 static bool is_point_and_within_region(const mvt_feature& feature) {
-  return region_feature != NULL && feature.type == VT_POINT &&
-      feature_intersects_region(*region_feature, feature);
+  return !region_polygons.empty() && feature.type == VT_POINT &&
+      feature_intersects_region(region_polygons, feature);
 }
 
 void clear_features_intersecting_region(
@@ -302,13 +377,14 @@ void clear_features_intersecting_region(
     int* num_point_features_removed, int* num_features_modified) {
   *num_point_features_removed = 0;
   *num_features_modified = 0;
-  region_feature = get_region_feature(t, region_tile);
+  get_region_polygons(t, region_tile, &region_polygons);
 
   // Loop through all layers and features in main_tile.
   // Apply the following rules:
   // 1. Remove any point feature within the region.
   // 2. Clear names on any feature intersecting the region.
-  int num_names_cleaned = 0;
+  int num_names_cleaned = 0, num_point_features_kept = 0,
+    num_lines_polygons_not_modified = 0;
   for (size_t l = 0; l < main_tile->layers.size(); l++) {
     mvt_layer* layer = &main_tile->layers[l];
     // Remove point feature.
@@ -318,21 +394,26 @@ void clear_features_intersecting_region(
                     is_point_and_within_region), features->end());
     *num_point_features_removed += cit - features->end();
 
+    // Clear names on polyline or polygon features.
     for (size_t f = 0; f < layer->features.size(); f++) {
       mvt_feature* feature = &layer->features[f];
-      if (region_feature != NULL &&
-          feature_intersects_region(*region_feature, *feature)) {
-        if (feature->type != VT_POINT) {
-          num_names_cleaned += clear_names(layer, feature);
-          *num_features_modified += 1;
-        }
+      if (feature->type == VT_POINT) {
+        num_point_features_kept++;
+      } else if (feature_intersects_region(region_polygons, *feature)) {
+        num_names_cleaned += clear_names(layer, feature);
+        *num_features_modified += 1;
+      } else {
+        num_lines_polygons_not_modified++;
       }
     }
   }
   if (verbose) {
     cout << "Modified tile " << t.z << " " << t.x << " " << t.y
-         << ": removed " << *num_point_features_removed << " point features "
-            "and cleaned " << num_names_cleaned << " names." << endl;
+         << ": Point features removed: " << *num_point_features_removed
+         << ", kept: " << num_point_features_kept
+         << " Line/Polygon features modified: " << *num_features_modified
+         << ", not modified: " << num_lines_polygons_not_modified
+         << ", names cleaned: " << num_names_cleaned << endl;
   }
 }
 
