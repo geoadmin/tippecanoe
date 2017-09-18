@@ -188,8 +188,8 @@ void delete_interior_tiles(string fname, set<zxy> interior_tiles,
         sqlite3_free(err);
       } else {
         num_tiles_deleted++;
-        if(num_tiles_deleted%1000 == 0) {
-          cout << "Interior tiles deleted: " << num_tiles_deleted << endl;
+        if(num_tiles_deleted%100 == 0) {
+          cout << "Interior tiles deleted: " << num_tiles_deleted << '\r';
         }
       }
     }
@@ -280,10 +280,12 @@ void get_region_polygons(const zxy& t,
     cerr << "WARNING: Region tile " << t.z << " " << t.x << " " << t.y
          << " does not have any layer. Skipping clean-up of boundary tile."
          << endl;
+    return;
   } else if (region_tile.layers[0].features.empty()) {
     cerr << "WARNING: Region tile " << t.z << " " << t.x << " " << t.y
          << " does not have any feature. Skipping clean-up of boundary tile."
          << endl;
+    return;
   } else if (region_tile.layers.size() > 1) {
     cerr << "WARNING: Region tile " << t.z << " " << t.x << " " << t.y
          << " has more than one layer: "
@@ -503,15 +505,15 @@ void clear_boundary_tiles(const string& main_fname,
 }
 
 void mbtile_vacuum(const string& mbtile_name) {
-  cerr << "Vacuuming sqlite3 db " << mbtile_name << "...";
+  cerr << "Vacuum sqlite3 db " << mbtile_name << "...";
   sqlite3* db;
   if (sqlite3_open(mbtile_name.c_str(), &db) != SQLITE_OK) {
      cerr << mbtile_name << ": " << sqlite3_errmsg(db) << endl;
      exit(EXIT_FAILURE);
   }
-  char *err = 0;
-  const string query = "vacuum;";
-  int rc = sqlite3_exec(db, query.c_str(), NULL, NULL, &err);
+  char* err = 0;
+  const string kQuery("vacuum;");
+  int rc = sqlite3_exec(db, kQuery.c_str(), NULL, NULL, &err);
   if (rc != SQLITE_OK){
     cerr << "SQL error: " << err << endl;
     sqlite3_free(err);
@@ -522,6 +524,113 @@ void mbtile_vacuum(const string& mbtile_name) {
      exit(EXIT_FAILURE);
   }
   cerr << " done." << endl;
+}
+
+void clone_mbtile(const string& original_mbtile, const string& main_mbtile) {
+  cerr << "Copying tiles & metadata tables from " << original_mbtile
+       << " into " << main_mbtile << "...\n";
+  sqlite3* db;
+  if (sqlite3_open(main_mbtile.c_str(), &db) != SQLITE_OK) {
+    cerr << main_mbtile << ": " << sqlite3_errmsg(db) << endl;
+    exit(EXIT_FAILURE);
+  }
+  char* err = 0;
+  // Attach original MBTile as originaldb.
+  const string kAttachQuery("ATTACH DATABASE \"" + original_mbtile +
+      "\" AS originaldb;");
+  int rc = sqlite3_exec(db, kAttachQuery.c_str(), NULL, NULL, &err);
+  if (rc != SQLITE_OK){
+    cerr << "SQL error: " << kAttachQuery << endl << err << endl;
+    sqlite3_free(err);
+    exit(EXIT_FAILURE);
+  }
+  // Create tiles table.
+  const string kCreateTilesQuery("CREATE TABLE tiles (zoom_level integer,"
+      "tile_column integer, tile_row integer, tile_data blob);");
+  rc = sqlite3_exec(db, kCreateTilesQuery.c_str(), NULL, NULL, &err);
+  if (rc != SQLITE_OK){
+    cerr << "SQL error: " << kCreateTilesQuery << endl << err << endl;
+    sqlite3_free(err);
+    exit(EXIT_FAILURE);
+  }
+  // Copy tiles table from originaldb.
+  const string kCopyTilesQuery("INSERT INTO main.tiles(zoom_level, "
+      "tile_column, tile_row, tile_data) SELECT zoom_level, tile_column, "
+      "tile_row, tile_data FROM originaldb.tiles;");
+  rc = sqlite3_exec(db, kCopyTilesQuery.c_str(), NULL, NULL, &err);
+  if (rc != SQLITE_OK){
+    cerr << "SQL error: " << kCopyTilesQuery << endl << err << endl;
+    sqlite3_free(err);
+    exit(EXIT_FAILURE);
+  }
+  // Create tiles index.
+  const string kIndexTilesQuery("CREATE UNIQUE INDEX tile_index on "
+      "tiles (zoom_level, tile_column, tile_row);");
+  rc = sqlite3_exec(db, kIndexTilesQuery.c_str(), NULL, NULL, &err);
+  if (rc != SQLITE_OK){
+    cerr << "SQL error: " << kIndexTilesQuery << endl << err << endl;
+    sqlite3_free(err);
+    exit(EXIT_FAILURE);
+  }
+
+  // Create metadata table.
+  const string kCreateMetadataQuery(
+      "CREATE TABLE metadata (name text, value text);");
+  rc = sqlite3_exec(db, kCreateMetadataQuery.c_str(), NULL, NULL, &err);
+  if (rc != SQLITE_OK){
+    cerr << "SQL error: " << kCreateMetadataQuery << endl << err << endl;
+    sqlite3_free(err);
+    exit(EXIT_FAILURE);
+  }
+  // Copy metadata table from originaldb.
+  const string kCopyMetadataQuery("INSERT INTO main.metadata (name, value) "
+      "SELECT name, value FROM originaldb.metadata;");
+  rc = sqlite3_exec(db, kCopyMetadataQuery.c_str(), NULL, NULL, &err);
+  if (rc != SQLITE_OK){
+    cerr << "SQL error: " << kCopyMetadataQuery << endl << err << endl;
+    sqlite3_free(err);
+    exit(EXIT_FAILURE);
+  }
+  // Create metadata index.
+  const string kIndexMetadataQuery(
+      "CREATE UNIQUE INDEX name on metadata (name);");
+  rc = sqlite3_exec(db, kIndexMetadataQuery.c_str(), NULL, NULL, &err);
+  if (rc != SQLITE_OK){
+    cerr << "SQL error: " << kIndexMetadataQuery << endl << cerr << endl;
+    sqlite3_free(err);
+    exit(EXIT_FAILURE);
+  }
+
+  // Close main MBTile.
+  if (sqlite3_close(db) != SQLITE_OK) {
+     cerr << main_mbtile << ": could not close database: "
+          << sqlite3_errmsg(db) << endl;
+     exit(EXIT_FAILURE);
+  }
+}
+
+void update_tiles_index(const string& main_mbtile) {
+  cerr << "Updating tiles index..." << endl;
+  sqlite3* db;
+  if (sqlite3_open(main_mbtile.c_str(), &db) != SQLITE_OK) {
+    cerr << main_mbtile << ": " << sqlite3_errmsg(db) << endl;
+    exit(EXIT_FAILURE);
+  }
+  char* err = 0;
+  // Create tiles index.
+  const string kIndexTilesQuery("REINDEX tile_index;");
+  int rc = sqlite3_exec(db, kIndexTilesQuery.c_str(), NULL, NULL, &err);
+  if (rc != SQLITE_OK){
+    cerr << "SQL error: " << err << endl;
+    sqlite3_free(err);
+  }
+
+  // Close main MBTile.
+  if (sqlite3_close(db) != SQLITE_OK) {
+     cerr << main_mbtile << ": could not close database: "
+          << sqlite3_errmsg(db) << endl;
+     exit(EXIT_FAILURE);
+  }
 }
 
 void usage(char **argv) {
@@ -538,7 +647,9 @@ void usage(char **argv) {
           "cut out as polygon (required).\n"
           "  --boundary-tileset\t\t-b\tBoundary MBtile containing the outline "
           "of the region to cut out (required).\n"
-          "  --main-is-raster\t-s\tIf set the main tileset contains raster "
+          "  --original-tileset\t\t-o\tOptional MBtile as input. If set, this "
+          "tileset acts as source for the newly created main MBtile.\n"
+          "  --main-is-raster\t\t-s\tIf set the main tileset contains raster "
           "data with a tile size of 256 px. [default: off]\n"
           "  --help\t\t\t-h\tShow this usage.\n"
           "  --delete-tiles-within-region\t-R\tRemove tiles within region "
@@ -558,7 +669,7 @@ void print_elapsed_time(const chrono::steady_clock::time_point& begin) {
       static_cast<unsigned int>(secs.count() / 3600.0);
   cerr << "Elapsed time: " << hours
        << " h " << static_cast<int>((secs.count() - 3600 * hours) / 60.0)
-       << " m " << static_cast<int>(secs.count()%60) << " s" << endl;
+       << " m " << static_cast<int>(secs.count()%60) << " s" << endl << endl;
 }
 
 int main(int argc, char **argv) {
@@ -569,14 +680,16 @@ int main(int argc, char **argv) {
   bool main_is_raster = false;
   bool vacuum_mbtiles = false;
 
-  string main_tileset;
-  string region_tileset;
-  string boundary_tileset;
+  string main_tileset_fname;
+  string region_tileset_fname;
+  string boundary_tileset_fname;
+  string original_tileset_fname;
 	
   struct option long_options[] = {
     {"main-tileset", required_argument, 0, 'm'},
 	{"region-tileset", required_argument, 0, 'r'},
 	{"boundary-tileset", required_argument, 0, 'b'},
+	{"original-tileset", required_argument, 0, 'o'},
 	{"main-is-raster", no_argument, 0, 's'},
 	{"help", no_argument, 0, 'h'},
 	{"change-boundary-features", no_argument, 0, 'B'},
@@ -602,13 +715,16 @@ int main(int argc, char **argv) {
       case 0:
         break;
       case 'm':
-        main_tileset = optarg;
+        main_tileset_fname = optarg;
         break;
       case 'r':
-        region_tileset = optarg;
+        region_tileset_fname = optarg;
         break;
       case 'b':
-        boundary_tileset = optarg;
+        boundary_tileset_fname = optarg;
+        break;
+      case 'o':
+        original_tileset_fname = optarg;
         break;
       case 's':
         main_is_raster = true;
@@ -633,22 +749,27 @@ int main(int argc, char **argv) {
       }
   }
 
-  if (main_tileset.empty() || region_tileset.empty() ||
-      boundary_tileset.empty()) {
+  if (main_tileset_fname.empty() || region_tileset_fname.empty() ||
+      boundary_tileset_fname.empty()) {
     usage(argv);
   }
   const chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+
+  if (!original_tileset_fname.empty()) {
+    clone_mbtile(original_tileset_fname, main_tileset_fname);
+    print_elapsed_time(begin);
+  }
 
   set<zxy> main_tiles;
   set<zxy> interior_tiles;
   set<zxy> boundary_tiles;
   classify_tiles(
-      region_tileset, boundary_tileset, main_tileset,
+      region_tileset_fname, boundary_tileset_fname, main_tileset_fname,
       &interior_tiles, &boundary_tiles, &main_tiles);
   print_elapsed_time(begin);
 
   if (delete_tiles_within_region) {
-    delete_interior_tiles(main_tileset, interior_tiles, main_is_raster);
+    delete_interior_tiles(main_tileset_fname, interior_tiles, main_is_raster);
     print_elapsed_time(begin);
   }
 
@@ -656,13 +777,19 @@ int main(int argc, char **argv) {
     if (main_is_raster) {
       cerr << "WARNING: Processing of raster boundary tiles skipped." << endl;
     } else {
-      clear_boundary_tiles(main_tileset, region_tileset, boundary_tiles);
+      clear_boundary_tiles(main_tileset_fname, region_tileset_fname,
+                           boundary_tiles);
       print_elapsed_time(begin);
     }
   }
-
+  // Finalize MBtile.
+  if (!original_tileset_fname.empty() &&
+      (delete_tiles_within_region || change_boundary_features)) {
+    update_tiles_index(main_tileset_fname);
+    print_elapsed_time(begin);
+  }
   if (vacuum_mbtiles) {
-    mbtile_vacuum(main_tileset);
+    mbtile_vacuum(main_tileset_fname);
     print_elapsed_time(begin);
   }
   return 0;
