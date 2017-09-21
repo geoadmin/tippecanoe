@@ -562,8 +562,9 @@ such a way that
 * names on polygon & polyline features intersecting the region polygon are removed
 * features completely outside the polygon are kept unchanged
 
+The tool does not modify tiles on the border if the main `mbtiles` file contains raster data
+but just removes those tiles completely inside the region.
 Inner holes in the region polygon are disregarded.
-
 
 ### Input options
 
