@@ -551,6 +551,87 @@ Then you can join those populations to the geometries and discard the no-longer-
 ./tile-join -o population.mbtiles -x GEOID10 -c population.csv tl_2010_06001_tabblock10.mbtiles
 ```
 
+tile-cut
+========
+
+The `tile-cut` tool cuts out a region from an existing `mbtiles` file. The area
+to be cut out is defined by an ordinary polygon. Tiles completely contained by
+the polygon are removed whereas tiles intersecting the outline are modified in
+such a way that
+* point features completely inside the polygon are removed
+* names on polygon & polyline features intersecting the region polygon are removed
+* features completely outside the polygon are kept unchanged
+
+Inner holes in the region polygon are disregarded.
+
+
+### Input options
+
+ * `-m` or `--main-tileset`: The `mbtiles` file to be modified (required).
+ * `-r` or `--region-tileset`: The `mbtiles` file containing a region layer with the polygon (required).
+ * `-b` or `--boundary-tileset`: The `mbtiles` file containg the outline of the polygon (required).
+ * `-o` or `--original-tileset`: Optional `mbtiles` file with the original data. If set, the --main-tileset will be newly created from this tileset.
+ * `-s` or `--main-is-raster`: A boolean flag indicating the type of the main tileset. If set the main tileset contains raster data with a tilesize of 256 x 256 px [default: off].
+ * `-h` or `--help`: Show this usage.
+
+By default the tool modifies directly the main `mbtiles` file unless the option --original-tileset is provided.
+In that case changes are applied to a newly created `mbtiles` file which is a clone of the original tileset.
+
+
+### Processing options
+
+ * `-R` or `--delete-tiles-within-region`: Remove tiles fully contained by the region polygon at all zoom levels. [default: off]
+ * `-B` or `--change-boundary-features`: Modify boundary tiles intersecting the outline of the region. [default: off]
+ * `-V` or `--vacuum-mbtiles`: Compact sqlite3 database specified by --main-tileset. [default: off]
+ * `-v` or `--verbose`: Show detailed process information.
+
+### Preproccesing of the region `mbtiles` file and boundary `mbtiles` file
+
+Given a set of polygons in a GeoJSON file we first create a region `mbtiles` file containing only the area to be cut out with `tippecanoe`:
+```sh
+./tippecanoe -f --output region.mbtiles --maximum-zoom=14 --minimum-zoom=6 --projection EPSG:3857 area_ply.geojson
+```
+
+The boundary `mbtiles` file is similarly created and contains only the border as polyline:
+```sh
+./tippecanoe -f --output boundary.mbtiles --maximum-zoom=14 --minimum-zoom=6 --projection EPSG:3857 border_line.geojson
+```
+
+
+### Example usage
+
+```sh
+./tile-cut -m main-cut.mbtiles -b boundary.mbtiles -r region.mbtiles -o original.mbtiles -R -B -V
+Copying tiles & metadata tables from original.mbtiles into main-cut.mbtiles...
+Elapsed time: 0 h 4 m 58 s
+
+Classifying tiles...
+Total number of tiles in main tileset: 16371794
+Number of interior tiles: 18522
+Number of boundary tiles: 2389
+Number of exterior tiles: 16350919
+Difference (main-interior-boundary-exterior): -36
+Elapsed time: 0 h 5 m 20 s
+
+Deleting interior tiles...
+Zoom range of main tileset: 0 - 14
+Number of main tiles after deletion: 16353307
+Elapsed time: 0 h 7 m 49 s
+
+Process features in boundary tiles...
+WARNING: Region tile 13 4315 5326 does not have any layer. Skipping clean-up of boundary tile.
+All boundary tiles processed: 2389/2389
+Total number of boundary point features deleted: 61354
+Total number of boundary features modified: 518869
+Elapsed time: 0 h 8 m 17 s
+
+Updating tiles index...
+Elapsed time: 0 h 8 m 49 s
+
+Vacuum sqlite3 db main-cut.mbtiles... done.
+Elapsed time: 0 h 18 m 30 s
+```
+
 tippecanoe-enumerate
 ====================
 
