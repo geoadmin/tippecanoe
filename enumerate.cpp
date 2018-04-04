@@ -11,6 +11,12 @@ void enumerate(char *fname) {
 		exit(EXIT_FAILURE);
 	}
 
+	char *err = NULL;
+	if (sqlite3_exec(db, "PRAGMA integrity_check;", NULL, NULL, &err) != SQLITE_OK) {
+		fprintf(stderr, "%s: integrity_check: %s\n", fname, err);
+		exit(EXIT_FAILURE);
+	}
+
 	const char *sql = "SELECT zoom_level, tile_column, tile_row from tiles order by zoom_level, tile_column, tile_row;";
 
 	sqlite3_stmt *stmt;
@@ -23,6 +29,11 @@ void enumerate(char *fname) {
 		long long zoom = sqlite3_column_int(stmt, 0);
 		long long x = sqlite3_column_int(stmt, 1);
 		long long y = sqlite3_column_int(stmt, 2);
+
+		if (zoom < 0 || zoom > 31) {
+			fprintf(stderr, "Corrupt mbtiles file: impossible zoom level %lld\n", zoom);
+			exit(EXIT_FAILURE);
+		}
 
 		y = (1LL << zoom) - 1 - y;
 		printf("%s %lld %lld %lld\n", fname, zoom, x, y);

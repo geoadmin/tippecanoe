@@ -1,6 +1,7 @@
 #pragma once
 #include <assert.h>
 #include <math.h>
+#include <cmath>
 
 #if defined(_MSC_VER)
 #include "msinttypes/stdint.h"
@@ -283,7 +284,8 @@ inline void DigitGen(const DiyFp& W, const DiyFp& Mp, uint64_t delta, std::strin
 		kappa--;
 		if (p2 < delta) {
 			*K += kappa;
-			GrisuRound(buffer, *len, delta, p2, one.f, wp_w.f * kPow10[-kappa]);
+			int index = -static_cast<int>(kappa);
+			GrisuRound(buffer, *len, delta, p2, one.f, wp_w.f * (index < 9 ? kPow10[-static_cast<int>(kappa)] : 0));
 			return;
 		}
 	}
@@ -379,10 +381,10 @@ inline void Prettify(std::string &buffer, int length, int k) {
 inline std::string dtoa_milo(double value) {
 	std::string buffer;
 
-	if (isnan(value)) {
+	if (std::isnan(value)) {
 		return "nan";
 	}
-	if (isinf(value)) {
+	if (std::isinf(value)) {
 		if (value < 0) {
 			return "-inf";
 		} else {
