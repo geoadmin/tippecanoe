@@ -23,6 +23,13 @@ using mapbox::geometry::polygon;
 
 bool verbose = false;
 
+struct zxyrange {
+  int zoom;
+  long long col;
+  long long rowmin;
+  long long rowmax;
+};
+
 struct zxy {
   long long z;
   long long x;
@@ -77,10 +84,10 @@ void create_tile_set(const string fname, set<zxy>* tile_set) {
     tile.x = sqlite3_column_int(stmt, 1);
     tile.y = sqlite3_column_int(stmt, 2);
     tile_set->insert(tile);
-    if (verbose) {
-      cout << fname << " " << tile.z << " " << tile.x << " " <<  tile.y
-           << " (flipped y: " << (1LL << tile.z) - 1 - tile.y << ")" << endl;
-    }
+    //if (verbose) {
+    //  cout << fname << " " << tile.z << " " << tile.x << " " <<  tile.y
+    //       << " (flipped y: " << (1LL << tile.z) - 1 - tile.y << ")" << endl;
+    //}
   }
 
   sqlite3_finalize(stmt);
@@ -94,7 +101,7 @@ void create_tile_set(const string fname, set<zxy>* tile_set) {
 void classify_tiles(
     const string region_fname, const string boundary_fname,
     const string main_fname, set<zxy>* interior_set,
-    set<zxy>* boundary_set, set<zxy>* main_set) {
+    set<zxy>* boundary_set, set<zxy>* outside_set, set<zxy>* main_set) {
   cerr << "Classifying tiles..." << endl;
   set<zxy> region_set;
   create_tile_set(region_fname, &region_set);
@@ -104,21 +111,20 @@ void classify_tiles(
                  inserter(*interior_set, interior_set->end()));
 
   create_tile_set(main_fname, main_set);
-  set<zxy> exterior_set;
   set_difference(main_set->begin(), main_set->end(),
                  region_set.begin(), region_set.end(),
-                 inserter(exterior_set, exterior_set.end()));
+                 inserter(*outside_set, outside_set->end()));
 
   const long long main = main_set->size();
   const long long interior = interior_set->size();
   const long long boundary = boundary_set->size();
-  const long long exterior = exterior_set.size();
+  const long long outside = outside_set->size();
   cout << "Total number of tiles in main tileset: " << main << endl;
   cout << "Number of interior tiles: " << interior << endl;
   cout << "Number of boundary tiles: " << boundary << endl;
-  cout << "Number of exterior tiles: " << exterior << endl;
-  cout << "Difference (main-interior-boundary-exterior): "
-       << main - interior - boundary - exterior << endl;
+  cout << "Number of outside tiles: " << outside << endl;
+  cout << "Difference (main-interior-boundary-outside): "
+       << main - interior - boundary - outside << endl;
 }
 
 void identify_zoom_range(sqlite3* db, int* min_zoom, int* max_zoom) {
@@ -149,22 +155,47 @@ void identify_zoom_range(sqlite3* db, int* min_zoom, int* max_zoom) {
        << endl;
 }
 
-void delete_interior_tiles(string fname, set<zxy> interior_tiles,
+void delete_ranges(zxyrange ranges, sqlite3* db, long long& num_tiles_deleted) {
+  char query[200];
+  snprintf(
+      query, 200,
+      "delete from tiles where zoom_level=%d and tile_column=%lld "
+      "and (tile_row between %lld and %lld);",
+      ranges.zoom, ranges.col, ranges.rowmin, ranges.rowmax);
+  if (verbose) {
+    cout << "[" << ranges.zoom << "/" << ranges.col << "/" << ranges.rowmin << "-" << ranges.rowmax << "]: "<< query
+         << endl;
+  }
+  char *err = 0;
+  int rc = sqlite3_exec(db, query, NULL, NULL, &err);
+  if (rc != SQLITE_OK){
+    cerr << "SQL error: " << err << endl;
+    sqlite3_free(err);
+  } else {
+    num_tiles_deleted += (ranges.rowmax - ranges.rowmin + 1);
+    cout << "Tiles deleted: " << num_tiles_deleted << '\r';
+  }
+   
+};
+
+void delete_tiles(string fname, set<zxy>* tiles_to_delete,
                            bool main_is_raster) {
-  cerr << "Deleting interior tiles..." << endl;
+  cerr << "Deleting tiles..." << endl;
   sqlite3 *db;
   if (sqlite3_open(fname.c_str(), &db) != SQLITE_OK) {
     cerr << fname << ": " << sqlite3_errmsg(db) << endl;
     exit(EXIT_FAILURE);
   }
-  char query[200];
   // We assume that the size of raster tiles is 256 x 256 px. This results in
   // a zoom level increased by one and 2 x 2 tiles.
   const int num_tiles = main_is_raster ? 4 : 1;
   long long num_tiles_deleted = 0;
   int min_zoom = 0, max_zoom = 24;
+  zxyrange ranges;
+  ranges.zoom = -1;
+
   identify_zoom_range(db, &min_zoom, &max_zoom);
-  for (auto t : interior_tiles) {
+  for (auto t : *tiles_to_delete) {
     const int zoom_level = main_is_raster ? t.z + 1 : t.z;
     if (zoom_level < min_zoom || zoom_level > max_zoom) {
       continue;
@@ -172,27 +203,24 @@ void delete_interior_tiles(string fname, set<zxy> interior_tiles,
     for (int i = 0; i < num_tiles; ++i) {
       const long long tile_column = main_is_raster ? t.x * 2 + i%2 : t.x;
       const long long tile_row = main_is_raster ? t.y * 2 + i/2 : t.y;
-      snprintf(
-          query, 200,
-          "delete from tiles where zoom_level=%d and tile_column=%lld "
-          "and tile_row=%lld;",
-          zoom_level, tile_column, tile_row);
-      if (verbose) {
-        cout << "[" << t.z << "/" << t.x << "/" << t.y << "]: "<< query
-             << endl;
-      }
-      char *err = 0;
-      int rc = sqlite3_exec(db, query, NULL, NULL, &err);
-      if (rc != SQLITE_OK){
-        cerr << "SQL error: " << err << endl;
-        sqlite3_free(err);
+
+      if (ranges.zoom == zoom_level &&
+          ranges.col == tile_column &&
+          ranges.rowmax == tile_row - 1) {
+          ranges.rowmax = tile_row;
       } else {
-        num_tiles_deleted++;
-        if(num_tiles_deleted%100 == 0) {
-          cout << "Interior tiles deleted: " << num_tiles_deleted << '\r';
+        if (ranges.zoom != -1) {
+          delete_ranges(ranges, db, num_tiles_deleted);
         }
+        ranges.zoom = zoom_level;
+        ranges.col = tile_column;
+        ranges.rowmin = tile_row;
+        ranges.rowmax = tile_row;
       }
     }
+  }
+  if (ranges.zoom != -1) {
+    delete_ranges(ranges, db, num_tiles_deleted);
   }
 
   if (sqlite3_close(db) != SQLITE_OK) {
@@ -343,6 +371,34 @@ static int pnpoly(const linear_ring<int64_t>& ring,
   return c;
 }
 
+bool feature_inside_region(vector<polygon<int64_t> > region_polygons,
+                               const mvt_feature& main_feature) {
+  if (region_polygons.empty()) {
+    return false;
+  }
+  // A feature is inside if all points lie within a polygon.
+  // This is an approximation which should be good enough for our purpose.
+  for (size_t g = 0; g < main_feature.geometry.size(); g++) {
+    const point<int64_t> pt(main_feature.geometry[g].x,
+                            main_feature.geometry[g].y);
+    // Check the point against every ring in polygons.
+    for (size_t p = 0; p < region_polygons.size(); p++) {
+      for (size_t r = 0; r < region_polygons[p].size(); r++) {
+        const linear_ring<int64_t>& ring = region_polygons[p][r];
+        // TODO: Add support for holes where a ring could be a inner ring,
+        // i.e. a hole.
+        // const bool is_outer_ring = area(ring) > 0 ? true : false;
+        //
+        // return false as soon as a point outside is found.
+        if (!pnpoly(ring, pt)) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 bool feature_intersects_region(vector<polygon<int64_t> > region_polygons,
                                const mvt_feature& main_feature) {
   if (region_polygons.empty()) {
@@ -369,9 +425,9 @@ bool feature_intersects_region(vector<polygon<int64_t> > region_polygons,
 }
 
 static vector<polygon<int64_t>> region_polygons;
-static bool is_point_and_within_region(const mvt_feature& feature) {
-  return !region_polygons.empty() && feature.type == VT_POINT &&
-      feature_intersects_region(region_polygons, feature);
+static bool is_within_region(const mvt_feature& feature) {
+  return !region_polygons.empty() &&
+      feature_inside_region(region_polygons, feature);
 }
 
 void clear_features_intersecting_region(
@@ -384,7 +440,8 @@ void clear_features_intersecting_region(
   // Loop through all layers and features in main_tile.
   // Apply the following rules:
   // 1. Remove any point feature within the region.
-  // 2. Clear names on any feature intersecting the region.
+  // 2. Remove any feature fully within the region.
+  // 3. Clear names on any feature intersecting the region.
   int num_names_cleaned = 0, num_point_features_kept = 0,
     num_lines_polygons_not_modified = 0;
   for (size_t l = 0; l < main_tile->layers.size(); l++) {
@@ -393,7 +450,7 @@ void clear_features_intersecting_region(
     vector<mvt_feature>* features = &layer->features;
     vector<mvt_feature>::const_iterator cit = features->end();
     features->erase(remove_if(features->begin(), features->end(),
-                    is_point_and_within_region), features->end());
+                    is_within_region), features->end());
     *num_point_features_removed += cit - features->end();
 
     // Clear names on polyline or polygon features.
@@ -677,6 +734,7 @@ int main(int argc, char **argv) {
   int i;
   bool change_boundary_features = false;
   bool delete_tiles_within_region = false;
+  bool delete_tiles_outside_region = false;
   bool main_is_raster = false;
   bool vacuum_mbtiles = false;
 
@@ -694,6 +752,7 @@ int main(int argc, char **argv) {
 	{"help", no_argument, 0, 'h'},
 	{"change-boundary-features", no_argument, 0, 'B'},
 	{"delete-tiles-within-region", no_argument, 0, 'R'},
+	{"delete-tiles-outside-boundary", no_argument, 0, 'O'},
 	{"vacuum-mbtiles", no_argument, 0, 'V'},
 	{"verbose", no_argument, 0, 'v'},
 	{0, 0, 0, 0},
@@ -741,6 +800,8 @@ int main(int argc, char **argv) {
       case 'R':
         delete_tiles_within_region = true;
         break;
+      case 'O':
+        delete_tiles_outside_region = true;
       case 'V':
         vacuum_mbtiles = true;
         break;
@@ -763,28 +824,44 @@ int main(int argc, char **argv) {
   set<zxy> main_tiles;
   set<zxy> interior_tiles;
   set<zxy> boundary_tiles;
+  set<zxy> outside_tiles;
   classify_tiles(
       region_tileset_fname, boundary_tileset_fname, main_tileset_fname,
-      &interior_tiles, &boundary_tiles, &main_tiles);
+      &interior_tiles, &boundary_tiles, &outside_tiles, &main_tiles);
   print_elapsed_time(begin);
+  cerr << "Classifying done..." << endl;
 
-  if (delete_tiles_within_region) {
-    delete_interior_tiles(main_tileset_fname, interior_tiles, main_is_raster);
+  if (delete_tiles_outside_region) {
+    cerr << "Deleting tiles outside region..." << endl;
+    delete_tiles(main_tileset_fname, &outside_tiles, main_is_raster);
     print_elapsed_time(begin);
+    cerr << "Deleted tiles outside region..." << endl;
   }
 
+  if (delete_tiles_within_region) {
+    cerr << "Deleting tiles inside region..." << endl;
+    delete_tiles(main_tileset_fname, &interior_tiles, main_is_raster);
+    print_elapsed_time(begin);
+    cerr << "Deletied tiles inside region..." << endl;
+  }
+  cerr << "Deletions over (if any)..." << endl;
+
   if (change_boundary_features) {
+    cerr << "Changing boundary features..." << endl;
     if (main_is_raster) {
       cerr << "WARNING: Processing of raster boundary tiles skipped." << endl;
     } else {
+      cerr << "clear boundary tiles..." << endl;
       clear_boundary_tiles(main_tileset_fname, region_tileset_fname,
                            boundary_tiles);
       print_elapsed_time(begin);
+      cerr << "cleared boundary tiles..." << endl;
     }
   }
   // Finalize MBtile.
+  cerr << "Finalising..." << endl;
   if (!original_tileset_fname.empty() &&
-      (delete_tiles_within_region || change_boundary_features)) {
+      (delete_tiles_within_region || delete_tiles_outside_region || change_boundary_features)) {
     update_tiles_index(main_tileset_fname);
     print_elapsed_time(begin);
   }
