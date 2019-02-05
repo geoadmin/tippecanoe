@@ -381,7 +381,12 @@ bool feature_inside_region(vector<polygon<int64_t> > region_polygons,
   for (size_t g = 0; g < main_feature.geometry.size(); g++) {
     const point<int64_t> pt(main_feature.geometry[g].x,
                             main_feature.geometry[g].y);
+    //CLOSEPATH has invalid coordinates, so we ignore them
+    if (main_feature.geometry[g].op == VT_CLOSEPATH) {
+      continue;
+    }
     // Check the point against every ring in polygons.
+    bool bPointInside = false;
     for (size_t p = 0; p < region_polygons.size(); p++) {
       for (size_t r = 0; r < region_polygons[p].size(); r++) {
         const linear_ring<int64_t>& ring = region_polygons[p][r];
@@ -389,11 +394,14 @@ bool feature_inside_region(vector<polygon<int64_t> > region_polygons,
         // i.e. a hole.
         // const bool is_outer_ring = area(ring) > 0 ? true : false;
         //
-        // return false as soon as a point outside is found.
-        if (!pnpoly(ring, pt)) {
-          return false;
+        // this point is inside one polygon/ring
+        if (pnpoly(ring, pt)) {
+          bPointInside = true;
         }
       }
+    }
+    if (!bPointInside) {
+      return false;
     }
   }
   return true;
@@ -432,26 +440,25 @@ static bool is_within_region(const mvt_feature& feature) {
 
 void clear_features_intersecting_region(
     const zxy& t, const mvt_tile& region_tile, mvt_tile* main_tile,
-    int* num_point_features_removed, int* num_features_modified) {
-  *num_point_features_removed = 0;
+    int* num_features_removed, int* num_features_modified) {
+  *num_features_removed = 0;
   *num_features_modified = 0;
   get_region_polygons(t, region_tile, &region_polygons);
 
   // Loop through all layers and features in main_tile.
   // Apply the following rules:
-  // 1. Remove any point feature within the region.
-  // 2. Remove any feature fully within the region.
-  // 3. Clear names on any feature intersecting the region.
+  // 1. Remove any feature fully within the region.
+  // 2. Clear names on any feature intersecting the region.
   int num_names_cleaned = 0, num_point_features_kept = 0,
     num_lines_polygons_not_modified = 0;
   for (size_t l = 0; l < main_tile->layers.size(); l++) {
     mvt_layer* layer = &main_tile->layers[l];
-    // Remove point feature.
+    // Remove all features inside reagion feature.
     vector<mvt_feature>* features = &layer->features;
     vector<mvt_feature>::const_iterator cit = features->end();
     features->erase(remove_if(features->begin(), features->end(),
                     is_within_region), features->end());
-    *num_point_features_removed += cit - features->end();
+    *num_features_removed += cit - features->end();
 
     // Clear names on polyline or polygon features.
     for (size_t f = 0; f < layer->features.size(); f++) {
@@ -468,8 +475,8 @@ void clear_features_intersecting_region(
   }
   if (verbose) {
     cout << "Modified tile " << t.z << " " << t.x << " " << t.y
-         << ": Point features removed: " << *num_point_features_removed
-         << ", kept: " << num_point_features_kept
+         << ": Features removed: " << *num_features_removed
+         << ", Points kept: " << num_point_features_kept
          << " Line/Polygon features modified: " << *num_features_modified
          << ", not modified: " << num_lines_polygons_not_modified
          << ", names cleaned: " << num_names_cleaned << endl;
