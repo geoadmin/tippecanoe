@@ -584,6 +584,7 @@ In that case changes are applied to a newly created `mbtiles` file which is a cl
 ### Processing options
 
  * `-R` or `--delete-tiles-within-region`: Remove tiles fully contained by the region polygon at all zoom levels. [default: off]
+ * `-O` or `--delete-tiles-outside-region`: Remove tiles fully outside the region polygon at all zoom levels. [default: off]
  * `-B` or `--change-boundary-features`: Modify boundary tiles intersecting the outline of the region. [default: off]
  * `-V` or `--vacuum-mbtiles`: Compact sqlite3 database specified by --main-tileset. [default: off]
  * `-v` or `--verbose`: Show detailed process information.

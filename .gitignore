@@ -32,9 +32,11 @@
 *.app
 tippecanoe
 tile-join
+tile-cut
 tippecanoe-decode
 tippecanoe-enumerate
 unit
+geojson2nd
 
 # Vim
 *.swp
